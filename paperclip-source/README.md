@@ -4,6 +4,7 @@ This directory preserves the source materials recovered from the Paperclip SEO/b
 
 ## Contents
 
+- `exact-blog-agent-2/` — complete, unmodified mirror of the original 2,054-file blog-agent-2 source tree, including the full 38-skill library, references, scripts, templates, pipeline assets, examples, and run materials. This is the primary exact-source handoff.
 - `agent/` — the SEO agent’s `AGENTS.md`, `SOUL.md`, `TOOLS.md`, `HEARTBEAT.md`, `SCORECARD.md`, memory policy, and role context.
 - `blog-engine/.claude/skills/` — the full skill library available to the blog engine, including each original `SKILL.md`, references, scripts, and templates.
 - `blog-engine/references/` — the routine’s source map, execution contract, prompt map, stage-task map, scorecards, quality rules, visual system, product-proof rules, and portfolio-improvement system.
@@ -12,7 +13,7 @@ This directory preserves the source materials recovered from the Paperclip SEO/b
 
 ## Reading order
 
-Start with `agent/AGENTS.md`, then `blog-engine/PIPELINE.md`, then `blog-engine/references/eo-blog-routine/execution-contract.md`. The execution contract is the authoritative routine for the active four-run weekly publishing lane.
+Start with `exact-blog-agent-2/README.md`, `exact-blog-agent-2/PIPELINE.md`, and `exact-blog-agent-2/.claude/skills/`. Then read `agent/AGENTS.md` and `blog-engine/references/eo-blog-routine/execution-contract.md` for the later Paperclip operating contract. The execution contract is the authoritative routine for the active four-run weekly publishing lane.
 
 ## Important context
 

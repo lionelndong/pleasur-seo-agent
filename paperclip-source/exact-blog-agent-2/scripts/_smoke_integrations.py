@@ -1,0 +1,711 @@
+"""Smoke-test API auth for external integrations the blog-agent pipeline depends on.
+
+Each test hits the cheapest read-only endpoint the provider exposes (typically
+`/account`, `/key`, or `/me`) just to confirm the env-loaded key authenticates.
+No content is generated, no quota is consumed beyond a single auth-validating
+GET, and nothing is written to the project's content-pipeline directory.
+
+Run via:
+    doppler run -- python scripts/_smoke_integrations.py [--targets openrouter,replicate,browser_use,strapi]
+
+Default targets exclude `strapi` because that hits a self-hosted CMS — pass
+explicitly when you want to verify that one.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+def _get(url: str, headers: dict[str, str], timeout: int = 15) -> dict:
+    # Cloudflare-fronted APIs (Replicate, others) reject urllib's default UA.
+    headers = {"User-Agent": "blog-agent-smoke/1.0", **headers}
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def check_openrouter() -> str:
+    key = os.environ.get("OPENROUTER_API_KEY_BLOG_AGENT") or os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        return "OPENROUTER FAIL — no key in env"
+    try:
+        data = _get("https://openrouter.ai/api/v1/key", {"Authorization": f"Bearer {key}"})
+        d = data.get("data", {})
+        return (
+            f"OPENROUTER OK — label={d.get('label', '?')} "
+            f"limit_remaining={d.get('limit_remaining')} "
+            f"usage={d.get('usage')} "
+            f"is_free_tier={d.get('is_free_tier')}"
+        )
+    except urllib.error.HTTPError as e:
+        return f"OPENROUTER FAIL — HTTP {e.code} {e.reason}: {e.read().decode('utf-8', errors='replace')[:200]}"
+    except Exception as e:
+        return f"OPENROUTER FAIL — {type(e).__name__}: {e}"
+
+
+def check_replicate() -> str:
+    key = os.environ.get("REPLICATE_API_TOKEN") or os.environ.get("REPLICATE_API_KEY")
+    if not key:
+        return "REPLICATE FAIL — no key in env"
+    try:
+        data = _get("https://api.replicate.com/v1/account", {"Authorization": f"Bearer {key}"})
+        return (
+            f"REPLICATE OK — type={data.get('type')} "
+            f"username={data.get('username')} "
+            f"name={data.get('name')}"
+        )
+    except urllib.error.HTTPError as e:
+        return f"REPLICATE FAIL — HTTP {e.code} {e.reason}: {e.read().decode('utf-8', errors='replace')[:200]}"
+    except Exception as e:
+        return f"REPLICATE FAIL — {type(e).__name__}: {e}"
+
+
+def check_browser_use() -> str:
+    key = os.environ.get("BROWSER_USE_API_KEY")
+    if not key:
+        return "BROWSER_USE FAIL — no key in env"
+    enabled = os.environ.get("BROWSER_USE_ENABLED", "").lower() in {"1", "true", "yes"}
+    # Try the documented Browser Use Cloud API balance endpoint; fall back to
+    # tasks list. Both are read-only and validate auth without spending credits.
+    for url in (
+        "https://api.browser-use.com/api/v1/balance",
+        "https://api.browser-use.com/api/v1/tasks?limit=1",
+    ):
+        try:
+            data = _get(url, {"Authorization": f"Bearer {key}"})
+            note = "" if enabled else " (note: BROWSER_USE_ENABLED is off — pipeline skips this integration by default)"
+            return f"BROWSER_USE OK — endpoint={url.rsplit('/', 1)[-1]} keys={list(data.keys())[:6]}{note}"
+        except urllib.error.HTTPError as e:
+            last = f"HTTP {e.code} {e.reason}"
+            continue
+        except Exception as e:
+            last = f"{type(e).__name__}: {e}"
+            continue
+    return f"BROWSER_USE FAIL — last error: {last}"
+
+
+def check_strapi() -> str:
+    base = os.environ.get("STRAPI_BASE_URL")
+    tok = os.environ.get("STRAPI_API_TOKEN")
+    if not (base and tok):
+        return "STRAPI FAIL — STRAPI_BASE_URL or STRAPI_API_TOKEN not in env"
+    base = base.rstrip("/")
+    try:
+        data = _get(
+            f"{base}/api/articles?pagination[limit]=1",
+            {"Authorization": f"Bearer {tok}"},
+        )
+        total = data.get("meta", {}).get("pagination", {}).get("total")
+        return f"STRAPI OK — base={base} total_articles={total}"
+    except urllib.error.HTTPError as e:
+        return f"STRAPI FAIL — HTTP {e.code} {e.reason}"
+    except Exception as e:
+        return f"STRAPI FAIL — {type(e).__name__}: {e}"
+
+
+def check_github() -> str:
+    key = os.environ.get("GITHUB_TOKEN")
+    if not key:
+        return "GITHUB FAIL — no token in env"
+    try:
+        data = _get(
+            "https://api.github.com/user",
+            {"Authorization": f"token {key}", "Accept": "application/vnd.github+json"},
+        )
+        return f"GITHUB OK — login={data.get('login')} type={data.get('type')}"
+    except urllib.error.HTTPError as e:
+        return f"GITHUB FAIL — HTTP {e.code} {e.reason}"
+    except Exception as e:
+        return f"GITHUB FAIL — {type(e).__name__}: {e}"
+
+
+def check_strapi_v5_payload_shape() -> str:
+    """Assert format_for_strapi.build_payload emits a Strapi v5 payload.
+
+    No network. Validates the schema invariants that PLEAA-457 fixed:
+      - Top-level data fields: title, slug, description, blocks, publishedAt
+      - description is ≤80 chars
+      - blocks[] non-empty with __component='shared.rich-text' and body markdown
+      - legacy v4 fields (excerpt / content / seo / categories[]) are absent
+      - category, when supplied, is a STRING (documentId), not an array
+    """
+    try:
+        # Import lazily so the rest of the smoke checks run even if the script
+        # path moves or has a syntax error in a feature branch.
+        import importlib.util
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        target = (
+            repo_root
+            / ".claude"
+            / "skills"
+            / "format-for-publish"
+            / "scripts"
+            / "format_for_strapi.py"
+        )
+        spec = importlib.util.spec_from_file_location("format_for_strapi", target)
+        if spec is None or spec.loader is None:
+            return f"STRAPI_V5_SHAPE FAIL — cannot load {target}"
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        body = (
+            "Intro line one introducing the topic at length so the description "
+            "extractor has more than eighty characters of usable prose to work "
+            "from before it gets truncated.\n\n## A heading\n\nMore body.\n"
+        )
+        payload = mod.build_payload(
+            "smoke-slug",
+            "Smoke Title",
+            body,
+            published_at=None,
+        )
+        d = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(d, dict):
+            return "STRAPI_V5_SHAPE FAIL — payload missing top-level data"
+
+        problems: list[str] = []
+        # Required v5 fields (verified by live POST/DELETE 2026-05-07).
+        for required in (
+            "title",
+            "slug",
+            "description",
+            "blocks",
+            "publishedAt",
+        ):
+            if required not in d:
+                problems.append(f"missing {required}")
+
+        desc = d.get("description")
+        if not isinstance(desc, str) or len(desc) > 80:
+            problems.append(f"description shape (got len={len(desc) if isinstance(desc, str) else 'n/a'}, cap=80)")
+
+        blocks = d.get("blocks")
+        if not isinstance(blocks, list) or not blocks:
+            problems.append("blocks must be non-empty list")
+        else:
+            first = blocks[0]
+            if not isinstance(first, dict):
+                problems.append("blocks[0] not an object")
+            else:
+                if first.get("__component") != "shared.rich-text":
+                    problems.append(f"blocks[0].__component={first.get('__component')!r} (want shared.rich-text)")
+                if not isinstance(first.get("body"), str) or not first["body"].strip():
+                    problems.append("blocks[0].body must be non-empty string")
+
+        # Strict-mode rejections — Strapi v5 returns HTTP 400 "Invalid key
+        # <name>" for any of these. Catching them here prevents the silent
+        # publish-failure regression PLEAA-457 was opened to close.
+        forbidden = (
+            "excerpt", "content", "seo", "categories",  # v4 legacy
+            "author_name", "read_time", "readTime",     # not in current v5 schema
+            "cover_image_url", "coverImage", "tags",
+        )
+        for f in forbidden:
+            if f in d:
+                problems.append(f"forbidden field {f!r} would be rejected by Strapi v5")
+
+        if "category" in d and not isinstance(d["category"], str):
+            problems.append(f"category must be documentId string, got {type(d['category']).__name__}")
+
+        if problems:
+            return "STRAPI_V5_SHAPE FAIL — " + "; ".join(problems)
+
+        # PLEAA-528 (2026-05-08): when a media_map is supplied, build_blocks
+        # must split the body into alternating shared.rich-text + shared.media
+        # blocks so the frontend renders each image. The single-block fallback
+        # (covered above) keeps working for dry-runs.
+        block_problems: list[str] = []
+        body_with_imgs = (
+            "Intro paragraph long enough that the description extractor has "
+            "more than eighty characters of usable prose before truncation.\n\n"
+            "![alt one](https://example.cdn/foo.png)\n\n"
+            "## A heading\n\nMore body text below the image.\n\n"
+            "![alt two](https://example.cdn/bar.png)\n\n"
+            "Closing paragraph.\n"
+        )
+        media_map = {
+            "foo.png": {"id": 100, "url": "https://example.cdn/foo.png"},
+            "bar.png": {"id": 101, "url": "https://example.cdn/bar.png"},
+        }
+        multi_payload = mod.build_payload(
+            "smoke-slug",
+            "Smoke Title",
+            body_with_imgs,
+            published_at=None,
+            media_map=media_map,
+        )
+        mb = (multi_payload.get("data") or {}).get("blocks") or []
+        if not (isinstance(mb, list) and len(mb) >= 4):
+            block_problems.append(f"multiblock got {len(mb)} blocks (want ≥4)")
+        else:
+            kinds = [b.get("__component") for b in mb if isinstance(b, dict)]
+            if kinds.count("shared.media") != 2:
+                block_problems.append(f"multiblock media count={kinds.count('shared.media')} (want 2)")
+            # PLEAA-567 (2026-05-11): the relation must be the OBJECT form
+            # ``{"id": <int>}`` — Strapi v5 silently drops the relation when
+            # a bare integer is sent inside a component, leaving file:null
+            # on the live record and no <img> on the rendered page.
+            files = [b.get("file") for b in mb if isinstance(b, dict) and b.get("__component") == "shared.media"]
+            if files != [{"id": 100}, {"id": 101}]:
+                block_problems.append(f"multiblock file shape={files} (want [{{'id': 100}}, {{'id': 101}}])")
+
+        # Without a media_map the emitter must fall back to a single rich-text
+        # block (preserves dry-run / no-API parity with pre-PLEAA-528 behaviour).
+        single = mod.build_blocks(body_with_imgs)
+        if len(single) != 1 or single[0].get("__component") != "shared.rich-text":
+            block_problems.append(f"no-media-map fallback shape: {[b.get('__component') for b in single]}")
+
+        # PLEAA-570 (2026-05-11): the article-level ``cover`` relation must be
+        # emitted as a bare integer (Strapi v5 single-media field) when a
+        # cover_file_id is supplied, and omitted otherwise. resolve_cover_file_id
+        # must surface the upload id of the first uploaded image referenced in
+        # the body — the same asset extract_cover_image_url would pick.
+        cover_id = mod.resolve_cover_file_id(body_with_imgs, media_map)
+        if cover_id != 100:
+            block_problems.append(f"resolve_cover_file_id got {cover_id!r} (want 100)")
+        if mod.resolve_cover_file_id(body_with_imgs, None) is not None:
+            block_problems.append("resolve_cover_file_id should return None when media_map is empty")
+        # PLEAA-570 Greptile P2 (2026-05-11): when the FIRST body image is an
+        # external CDN URL that isn't in media_map, resolve_cover_file_id must
+        # fall through to subsequent body images instead of returning None.
+        # Otherwise an article whose intro paragraph quotes a competitor's
+        # screenshot (external) silently ships with cover=null even though
+        # later images in the same article were uploaded.
+        body_external_first = (
+            "Intro paragraph long enough that the description extractor has "
+            "more than eighty characters of usable prose before truncation.\n\n"
+            "![external hero](https://external.cdn/promo.png)\n\n"
+            "## A heading\n\nMore body text below the image.\n\n"
+            "![alt two](https://example.cdn/bar.png)\n\n"
+            "Closing paragraph.\n"
+        )
+        cover_id_fallthrough = mod.resolve_cover_file_id(body_external_first, media_map)
+        if cover_id_fallthrough != 101:
+            block_problems.append(
+                f"resolve_cover_file_id external-first got {cover_id_fallthrough!r} (want 101 from second image)"
+            )
+        # And when EVERY image is external, the function must still return None
+        # so build_payload omits the cover relation entirely.
+        body_all_external = (
+            "Intro paragraph long enough that the description extractor has "
+            "more than eighty characters of usable prose before truncation.\n\n"
+            "![one](https://external.cdn/a.png)\n\n"
+            "![two](https://external.cdn/b.png)\n"
+        )
+        if mod.resolve_cover_file_id(body_all_external, media_map) is not None:
+            block_problems.append(
+                "resolve_cover_file_id all-external must return None (no uploaded ref to attach)"
+            )
+        cover_payload = mod.build_payload(
+            "smoke-slug",
+            "Smoke Title",
+            body_with_imgs,
+            published_at=None,
+            media_map=media_map,
+            cover_file_id=cover_id,
+        )
+        cd = (cover_payload.get("data") or {})
+        if cd.get("cover") != 100:
+            block_problems.append(f"payload.data.cover={cd.get('cover')!r} (want 100)")
+        no_cover_payload = mod.build_payload(
+            "smoke-slug",
+            "Smoke Title",
+            body_with_imgs,
+            published_at=None,
+            media_map=media_map,
+            cover_file_id=None,
+        )
+        if "cover" in (no_cover_payload.get("data") or {}):
+            block_problems.append("payload.data must omit 'cover' when cover_file_id is None")
+
+        if block_problems:
+            return "STRAPI_V5_SHAPE FAIL — " + "; ".join(block_problems)
+
+        return (
+            f"STRAPI_V5_SHAPE OK — fields="
+            f"{sorted(d.keys())} description_len={len(d['description'])} blocks={len(d['blocks'])} "
+            f"multiblock_blocks={len(mb)}"
+        )
+    except Exception as e:
+        return f"STRAPI_V5_SHAPE FAIL — {type(e).__name__}: {e}"
+
+
+def check_strapi_update_guard() -> str:
+    """PLEAA-457 (Greptile P1, round 2): on the ``--update`` PUT path, a
+    transient ``/api/categories`` fetch failure would silently wipe the
+    article's existing category server-side. ``publish_to_strapi`` aborts
+    with a clear error in that case. Smoke covers both branches:
+
+      * PUT without ``category`` → SystemExit (guard fired)
+      * PUT with ``category`` present → no abort (regression check)
+
+    No network — uses monkeypatched ``find_existing_article_id``.
+    """
+    try:
+        import importlib.util
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        target = (
+            repo_root
+            / ".claude"
+            / "skills"
+            / "format-for-publish"
+            / "scripts"
+            / "format_for_strapi.py"
+        )
+        spec = importlib.util.spec_from_file_location("format_for_strapi", target)
+        if spec is None or spec.loader is None:
+            return f"STRAPI_UPDATE_GUARD FAIL — cannot load {target}"
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        original_find = mod.find_existing_article_id
+        original_base = os.environ.get("STRAPI_BASE_URL")
+        original_token = os.environ.get("STRAPI_API_TOKEN")
+        try:
+            os.environ["STRAPI_BASE_URL"] = "https://example.invalid"
+            os.environ["STRAPI_API_TOKEN"] = "fake-token-for-smoke"
+            mod.find_existing_article_id = lambda *a, **kw: "FAKEDOCID"
+
+            base_payload = {"data": {
+                "title": "Existing",
+                "slug": "existing-slug-smoke",
+                "description": "smoke",
+                "blocks": [{"__component": "shared.rich-text", "body": "x"}],
+                "publishedAt": None,
+            }}
+
+            # Branch 1: missing category → must abort.
+            try:
+                mod.publish_to_strapi({"data": dict(base_payload["data"])}, update=True)
+                return "STRAPI_UPDATE_GUARD FAIL — PUT without category did not abort"
+            except SystemExit as e:
+                if "refusing to PUT" not in str(e):
+                    return f"STRAPI_UPDATE_GUARD FAIL — wrong abort message: {e}"
+
+            # Branch 2: category present → guard must NOT fire (we still hit a
+            # network error from the fake host, which is fine — that proves
+            # we got past the guard).
+            with_cat = {"data": dict(base_payload["data"], category="abc123documentid")}
+            try:
+                mod.publish_to_strapi(with_cat, update=True)
+            except SystemExit as e:
+                if "refusing to PUT" in str(e):
+                    return f"STRAPI_UPDATE_GUARD FAIL — guard fired with category present"
+                # any other SystemExit (network failure) is expected here.
+        finally:
+            mod.find_existing_article_id = original_find
+            if original_base is None:
+                os.environ.pop("STRAPI_BASE_URL", None)
+            else:
+                os.environ["STRAPI_BASE_URL"] = original_base
+            if original_token is None:
+                os.environ.pop("STRAPI_API_TOKEN", None)
+            else:
+                os.environ["STRAPI_API_TOKEN"] = original_token
+
+        return "STRAPI_UPDATE_GUARD OK — PUT-without-category aborts; PUT-with-category proceeds"
+    except Exception as e:
+        return f"STRAPI_UPDATE_GUARD FAIL — {type(e).__name__}: {e}"
+
+
+def check_category_resolver() -> str:
+    """PLEAA-524: ``resolve_category_name`` must (1) honour an explicit
+    ``category:`` line in the cited draft, (2) fall back to a slug heuristic,
+    and (3) drop unknown names back to the heuristic rather than passing them
+    through to Strapi (where they'd silently fail to resolve and the article
+    would publish with no category).
+    """
+    try:
+        import importlib.util
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        target = (
+            repo_root
+            / ".claude"
+            / "skills"
+            / "format-for-publish"
+            / "scripts"
+            / "format_for_strapi.py"
+        )
+        spec = importlib.util.spec_from_file_location("format_for_strapi", target)
+        if spec is None or spec.loader is None:
+            return f"CATEGORY_RESOLVER FAIL — cannot load {target}"
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        cases: list[tuple[str, str, str, str]] = [
+            # (label, slug, raw_md, expected_category)
+            ("frontmatter wins",     "ai-girlfriend-foo",  "category: Reviews\n# Title\nbody",  "Reviews"),
+            ("editor-notes section", "anything",           "# T\n\n## Editor notes\n\ncategory: Guides\n", "Guides"),
+            ("frontmatter case-insensitive", "ai-girlfriend-foo", "category: reviews\n# Title\nbody", "Reviews"),
+            ("review heuristic",     "muah-ai-review",     "# Title\nbody",                     "Reviews"),
+            ("guide heuristic",      "ai-chatbot-app-guide-2026", "# Title\nbody",              "Guides"),
+            ("uncensored heuristic", "best-uncensored-ai-chatbot-free", "# Title\nbody",        "Uncensored"),
+            ("nofilter heuristic",   "ai-chatbot-no-filter-2026", "# Title\nbody",              "Uncensored"),
+            ("default companions",   "ai-girlfriend-experience", "# Title\nbody",               "AI Companions"),
+            ("unknown override drops to heuristic",
+                                     "muah-ai-review",     "category: BogusCategory\n# T\nbody", "Reviews"),
+            ("priority-conflict: dirty+guide → Uncensored wins",
+                                     "dirty-ai-guide-2026", "# Title\nbody",                   "Uncensored"),
+        ]
+        problems: list[str] = []
+        for label, slug, md, expected in cases:
+            got = mod.resolve_category_name(slug, md)
+            if got != expected:
+                problems.append(f"{label}: slug={slug!r} expected={expected!r} got={got!r}")
+
+        if problems:
+            return "CATEGORY_RESOLVER FAIL — " + "; ".join(problems)
+        return f"CATEGORY_RESOLVER OK — {len(cases)} cases, known={sorted(mod.CATEGORY_KNOWN)}"
+    except Exception as e:
+        return f"CATEGORY_RESOLVER FAIL — {type(e).__name__}: {e}"
+
+
+def check_strapi_publish_gate() -> str:
+    """PLEAA-581 Layer 1 smoke: prove ``format_for_strapi.py --publish`` refuses
+    a slug that has no committed publish artifact, and that ``--human-approved
+    "<reason>"`` bypasses the refusal.
+
+    No network is needed. The check shells out to ``format_for_strapi.py`` with
+    a deliberately fake slug, asserts:
+
+      1. Plain ``--publish`` exits non-zero AND the gate-reject message
+         (``publish gate REJECT``) appears in combined output. The message must
+         name the missing artifact path so an operator knows which
+         ``content-pipeline/8-publish/<slug>/`` directory to fix.
+      2. ``--human-approved "<reason>"`` bypasses the gate — combined output
+         contains ``publish gate OVERRIDDEN`` and the per-slug audit log line
+         is appended to ``content-pipeline/audit/publish-overrides.log``.
+         (The subprocess still exits non-zero because the fake slug has no
+         cited draft — that's the next stage's failure, not ours.)
+      3. An empty override reason (``--human-approved ""``) is rejected with
+         a clear error message — empty reason is the gate's anti-shrug case.
+
+    Failure modes return a single-line FAIL string. Success returns OK with
+    counts so a reader can see which sub-cases passed.
+    """
+    import subprocess as _sp
+    from pathlib import Path as _P
+    import uuid as _uuid
+
+    here = _P(__file__).resolve()
+    repo_root = here.parents[1]
+    script = repo_root / ".claude" / "skills" / "format-for-publish" / "scripts" / "format_for_strapi.py"
+    if not script.exists():
+        return f"STRAPI_PUBLISH_GATE FAIL — script missing at {script}"
+
+    fake_slug = f"_smoke_strapi_publish_gate_{_uuid.uuid4().hex[:8]}"
+
+    def _run(*extra: str) -> _sp.CompletedProcess[str]:
+        return _sp.run(
+            [sys.executable, str(script), fake_slug, "--publish", *extra],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    # Case 1 — plain --publish must REJECT.
+    r1 = _run()
+    combined1 = (r1.stdout or "") + (r1.stderr or "")
+    if r1.returncode == 0:
+        return "STRAPI_PUBLISH_GATE FAIL — plain --publish exited 0 (gate did not reject)"
+    if "publish gate REJECT" not in combined1:
+        return f"STRAPI_PUBLISH_GATE FAIL — reject path missing gate message; got: {combined1[:240]!r}"
+    if "content-pipeline/8-publish" not in combined1:
+        return f"STRAPI_PUBLISH_GATE FAIL — reject message missing artifact path; got: {combined1[:240]!r}"
+
+    # Case 2 — --human-approved bypasses the gate and writes an audit line.
+    audit_log = repo_root / "content-pipeline" / "audit" / "publish-overrides.log"
+    pre_size = audit_log.stat().st_size if audit_log.exists() else 0
+    reason = "manual unpublish reseed"
+    r2 = _run("--human-approved", reason)
+    combined2 = (r2.stdout or "") + (r2.stderr or "")
+    if "publish gate OVERRIDDEN" not in combined2:
+        return f"STRAPI_PUBLISH_GATE FAIL — override path missing OVERRIDDEN message; got: {combined2[:240]!r}"
+    if not audit_log.exists():
+        return f"STRAPI_PUBLISH_GATE FAIL — audit log not created at {audit_log}"
+    post_size = audit_log.stat().st_size
+    if post_size <= pre_size:
+        return "STRAPI_PUBLISH_GATE FAIL — audit log not appended on override"
+    tail = audit_log.read_text(encoding="utf-8").splitlines()[-1] if post_size else ""
+    if fake_slug not in tail or reason not in tail:
+        return f"STRAPI_PUBLISH_GATE FAIL — audit log tail missing slug/reason: {tail!r}"
+
+    # Case 3 — empty reason must be rejected.
+    r3 = _run("--human-approved", "")
+    combined3 = (r3.stdout or "") + (r3.stderr or "")
+    if r3.returncode == 0:
+        return "STRAPI_PUBLISH_GATE FAIL — empty --human-approved reason exited 0"
+    if "non-empty reason" not in combined3:
+        return f"STRAPI_PUBLISH_GATE FAIL — empty-reason path missing rejection message; got: {combined3[:240]!r}"
+
+    return (
+        "STRAPI_PUBLISH_GATE OK — reject/override/empty-reason all enforced; "
+        f"audit log appended ({post_size - pre_size} bytes for fake slug)"
+    )
+
+
+def check_post_publish_mirror_assertion_retry() -> str:
+    """PLE-2371: post-publish mirror assertion must tolerate approval-sync lag.
+
+    No network is needed. The check monkeypatches urlopen so the first mirror
+    read is still draft, then the second is published. Success proves the helper
+    reruns sync-blog-posts instead of failing after one early sync.
+    """
+    try:
+        import importlib.util
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        target = (
+            repo_root
+            / ".claude"
+            / "skills"
+            / "format-for-publish"
+            / "scripts"
+            / "format_for_strapi.py"
+        )
+        spec = importlib.util.spec_from_file_location("format_for_strapi", target)
+        if spec is None or spec.loader is None:
+            return f"POST_PUBLISH_MIRROR_ASSERTION_RETRY FAIL — cannot load {target}"
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        class FakeResponse:
+            def __init__(self, body: bytes):
+                self.status = 200
+                self.reason = "OK"
+                self._body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return self._body
+
+        calls: list[tuple[str, str]] = []
+        sleeps: list[float] = []
+        mirror_reads = 0
+
+        def fake_urlopen(req, timeout=None):  # noqa: ANN001 - mirrors urllib signature.
+            nonlocal mirror_reads
+            url = getattr(req, "full_url", str(req))
+            method = getattr(req, "get_method", lambda: "GET")()
+            calls.append((method, url))
+            if "/functions/v1/sync-blog-posts" in url:
+                auth = dict(req.header_items()).get("Authorization")
+                if auth != "Bearer fake-webhook-secret":
+                    raise AssertionError(f"sync auth header used {auth!r}")
+                return FakeResponse(b'{"synced":1}')
+            if "/rest/v1/blog_posts" in url:
+                mirror_reads += 1
+                status = "draft" if mirror_reads == 1 else "published"
+                return FakeResponse(json.dumps([{"slug": "demo", "status": status}]).encode("utf-8"))
+            raise AssertionError(f"unexpected URL: {url}")
+
+        original_urlopen = urllib.request.urlopen
+        original_sleep = mod.time.sleep
+        original_url = os.environ.get("SUPABASE_URL")
+        original_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        original_webhook_secret = os.environ.get("STRAPI_WEBHOOK_SECRET")
+        try:
+            os.environ["SUPABASE_URL"] = "https://example.supabase.co"
+            os.environ["SUPABASE_SERVICE_ROLE_KEY"] = "fake-service-role-key"
+            os.environ["STRAPI_WEBHOOK_SECRET"] = "fake-webhook-secret"
+            urllib.request.urlopen = fake_urlopen
+            mod.time.sleep = lambda seconds: sleeps.append(seconds)
+
+            mod.assert_blog_post_mirrored("demo", max_attempts=3, sleep_seconds=0.01)
+        finally:
+            urllib.request.urlopen = original_urlopen
+            mod.time.sleep = original_sleep
+            if original_url is None:
+                os.environ.pop("SUPABASE_URL", None)
+            else:
+                os.environ["SUPABASE_URL"] = original_url
+            if original_key is None:
+                os.environ.pop("SUPABASE_SERVICE_ROLE_KEY", None)
+            else:
+                os.environ["SUPABASE_SERVICE_ROLE_KEY"] = original_key
+            if original_webhook_secret is None:
+                os.environ.pop("STRAPI_WEBHOOK_SECRET", None)
+            else:
+                os.environ["STRAPI_WEBHOOK_SECRET"] = original_webhook_secret
+
+        sync_calls = [c for c in calls if "/functions/v1/sync-blog-posts" in c[1]]
+        if len(sync_calls) != 2:
+            return f"POST_PUBLISH_MIRROR_ASSERTION_RETRY FAIL — expected 2 sync calls, got {len(sync_calls)}"
+        if any(method != "GET" for method, _url in sync_calls):
+            return f"POST_PUBLISH_MIRROR_ASSERTION_RETRY FAIL — sync call methods were {sync_calls!r}"
+        if mirror_reads != 2 or sleeps != [0.01]:
+            return (
+                "POST_PUBLISH_MIRROR_ASSERTION_RETRY FAIL — "
+                f"mirror_reads={mirror_reads} sleeps={sleeps!r}"
+            )
+
+        return "POST_PUBLISH_MIRROR_ASSERTION_RETRY OK — sync retried via GET until blog_posts status=published"
+    except Exception as e:
+        return f"POST_PUBLISH_MIRROR_ASSERTION_RETRY FAIL — {type(e).__name__}: {e}"
+
+
+CHECKS = {
+    "openrouter": check_openrouter,
+    "replicate": check_replicate,
+    "browser_use": check_browser_use,
+    "strapi": check_strapi,
+    "strapi_v5_shape": check_strapi_v5_payload_shape,
+    "strapi_update_guard": check_strapi_update_guard,
+    "category_resolver": check_category_resolver,
+    "github": check_github,
+    "strapi_publish_gate": check_strapi_publish_gate,
+    "post_publish_mirror_assertion_retry": check_post_publish_mirror_assertion_retry,
+    # Alias the spec's UPPERCASE label so operators can run it with the exact
+    # target name from PLEAA-581's acceptance criteria.
+    "STRAPI_PUBLISH_GATE": check_strapi_publish_gate,
+    "POST_PUBLISH_MIRROR_ASSERTION_RETRY": check_post_publish_mirror_assertion_retry,
+}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--targets",
+        default="openrouter,replicate,browser_use,github,strapi_v5_shape,strapi_update_guard,category_resolver",
+        help="comma-separated list of integrations to test (default excludes strapi network check)",
+    )
+    args = parser.parse_args()
+
+    targets = [t.strip() for t in args.targets.split(",") if t.strip()]
+    unknown = [t for t in targets if t not in CHECKS]
+    if unknown:
+        print(f"Unknown targets: {unknown}. Valid: {list(CHECKS)}", file=sys.stderr)
+        return 2
+
+    fail_count = 0
+    for name in targets:
+        result = CHECKS[name]()
+        print(result)
+        if "FAIL" in result:
+            fail_count += 1
+
+    print(f"\n{'-' * 60}")
+    print(f"PASS: {len(targets) - fail_count} / {len(targets)}")
+    return 1 if fail_count else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

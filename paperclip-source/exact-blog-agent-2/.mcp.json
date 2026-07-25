@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ahrefs": {
+      "type": "http",
+      "url": "https://api.ahrefs.com/mcp/mcp",
+      "headers": { "Authorization": "Bearer ${AHREFS_MCP_KEY}" }
+    }
+  }
+}
