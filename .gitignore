@@ -1,0 +1,7 @@
+# Generated run artifacts and local secrets
+.env
+.secrets/
+artifacts/
+logs/
+*.pem
+*.key
