@@ -5,7 +5,7 @@ Portable, evidence-gated SEO content operations extracted from the Paperclip blo
 ## Layout
 
 - `workflow/` — controller and ten-stage publishing flow.
-- `skills/` — portable skill catalog and stage assignments.
+- `skills/` — ten portable, executable `SKILL.md` modules plus the catalog and stage assignments.
 - `gates/` — selection, quality, visual, publish, and live-audit requirements.
 - `templates/` — artifacts required for every run.
 - `docs/` — architecture and migration guidance.
@@ -16,6 +16,6 @@ Run four scheduled **attempts** each week: Monday, Tuesday, Thursday, and Friday
 
 ## Use in Buzz
 
-Use `workflow/new-content-pipeline.md` as the controller specification. Load only the skills assigned to the current stage, write the required artifact, enforce every item in `gates/publish-gates.md`, and preserve the manifest and skill trace.
+Use `workflow/new-content-pipeline.md` as the controller specification. Load only the skills assigned to the current stage, write the required artifact, enforce every item in `gates/publish-gates.md`, and preserve the manifest and skill trace. Start with `skills/01-candidate-selection/SKILL.md` and advance only after its decision passes.
 
 No credentials, VPS paths, CMS tokens, private data, browser sessions, or legacy provider instructions are included.
