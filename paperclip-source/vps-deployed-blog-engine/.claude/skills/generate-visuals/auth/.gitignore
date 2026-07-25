@@ -1,0 +1,3 @@
+# Session secrets — never commit.
+*
+!.gitignore
