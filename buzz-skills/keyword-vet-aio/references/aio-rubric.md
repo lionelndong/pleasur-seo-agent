@@ -16,17 +16,22 @@ Use the full range. Do not force each run to contain every band.
 - `yes-shallow` — the reader may click for one narrow missing element.
 - `no` — clicking would be largely redundant.
 
-The score and click label must agree. Resolve any mismatch in the second review pass.
+The score and click label must form one of the combinations in the verdict table below. Resolve any unlisted combination in one documented rescore; if it remains inconsistent, return `needs_data`.
 
-## Intent application
+## Deterministic verdict table
 
-For informational intent:
+Apply the same table to informational and comparison/commercial-investigation candidates:
 
-- `8–10` and `no` → `FAIL_CANNIBALIZED`;
-- `5–7` → `RISKY`;
-- `0–4` → `PASS`.
+| Completeness score | Click intent | Verdict |
+|---|---|---|
+| `0–4` | `yes-deep` or `yes-shallow` | `PASS` |
+| `5–7` | `yes-deep` or `yes-shallow` | `RISKY` |
+| `8–10` | `yes-shallow` | `RISKY` |
+| `8–10` | `no` | `FAIL_CANNIBALIZED` |
 
-For comparison or commercial-investigation intent, test whether readers still need multiple options, explicit selection criteria, verifiable evidence, product-specific tradeoffs, or firsthand comparison. High completeness does not receive an automatic exemption.
+An unlisted combination is `needs_data` after one unsuccessful rescore. In particular, never reject a candidate as cannibalized while its evaluation still records retained click value.
+
+For comparison or commercial-investigation intent, test whether readers still need multiple options, explicit selection criteria, verifiable evidence, product-specific tradeoffs, or firsthand comparison. Express that value through `yes-deep` or `yes-shallow`; do not apply a separate exemption that can conflict with the table.
 
 For tool-led intent, route outside the blog queue rather than using AIO scoring to justify a blog post.
 

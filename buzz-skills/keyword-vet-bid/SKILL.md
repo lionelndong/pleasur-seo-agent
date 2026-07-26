@@ -44,8 +44,10 @@ Score `brand_fit` and `product_fit` from the approved brand snapshot, following 
 - Reject when live products exist and `product_fit < 3`.
 - Reject vanity-rank queries with no credible path to Pleasur.ai users or revenue.
 - Set `business_value` from genuine product usefulness. Do not reward `best`, `review`, `pricing`, or other salesy phrasing by itself.
+- Treat `business_value` as a prioritization signal, not an additional BID pass/fail threshold. A value of `1` may pass when the fit gates and credible-path check pass; downstream prioritization must preserve and penalize the weak path.
 - Flag free-seeker terms such as free, unlimited, no-account, or without paying. Do not reject solely for this signal; prioritization applies the conversion penalty.
 - When the approved snapshot explicitly has no products, skip the product gate, set `product_fit_applicable=false`, and record why.
+- Return `needs_data` when `business_value` contradicts the fit evidence, such as `business_value=0` alongside a passing product-fit score and claimed credible business path.
 
 ### 3. Apply Intent
 
@@ -67,14 +69,16 @@ Use ten usable current organic results when available. For each result, record U
 
 Calculate median top-ten DR. Count a weak link only when the packet names the URL and a concrete displacement reason such as:
 
-- authority or link strength materially below the rest of the SERP and within reach of Pleasur.ai;
+- result DR strictly below `brand_dr + 5`;
 - poor match to the dominant intent;
 - thin or materially incomplete coverage;
 - a forum, UGC, orphaned, or otherwise displaceable page type whose ranking is not explained by strong page-level evidence.
 
+The numeric DR condition is required for `weak_link_count`; the qualitative evidence supplies the displacement rationale and must not increase the count on its own.
+
 Pass Difficulty when either:
 
-- `median_top10_dr <= brand_dr + 12`; or
+- `median_top10_dr <= brand_dr + 15`; or
 - `weak_link_count >= 2`.
 
 Do not call a result weak merely because its DR is lower than the median. If fewer than ten usable results exist, record the reduced sample; use `needs_data` if the sample cannot support a defensible decision.
@@ -101,7 +105,8 @@ For every candidate, persist:
 
 - Every candidate has a terminal BID result and specific reason.
 - Every numeric score has evidence and rationale; scores are not flat-filled.
-- Every PASS meets both Business thresholds, has blog-suitable intent, and passes the DR-relative Difficulty gate.
+- Every PASS meets both fit thresholds and the credible-business-path check, has blog-suitable intent, and passes the DR-relative Difficulty gate.
+- `business_value` is preserved for prioritization and is not applied as a second, conflicting Business threshold.
 - Every weak link is named and justified.
 - Tool-led results are routed, not treated as blog candidates.
 - Missing evidence produces `needs_data`, never a guessed PASS or FAIL.

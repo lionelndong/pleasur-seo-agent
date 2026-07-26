@@ -14,7 +14,7 @@ Require for every candidate:
 - keyword, target country, discovery source, volume, KD, traffic potential, parent topic, and current content-gap status;
 - BID verdict, brand fit, product fit, product applicability, business value, free-seeker flag, observed intent, tool-led flag, current brand DR, median top-ten DR, weak-link evidence, and BID provenance;
 - AIO mode, presence, verdict, reasoning, and AIO evidence provenance;
-- an approved, versioned brand/product snapshot and current Pleasur.ai content inventory;
+- an approved, versioned brand/product snapshot, current Pleasur.ai content inventory, and current evidence-backed `max_targetable_kd`;
 - the Stage 01 formula/policy version and evidence-freshness decisions.
 
 Use `needs_data` when a required input is missing, stale, contradictory, or country-mismatched. Do not rank incomplete candidates.
@@ -57,18 +57,18 @@ If the approved brand snapshot has no products, use the no-products formula belo
 
 ### 3. Winnability
 
-Score 0–10 relative to current Pleasur.ai authority, never KD alone. Use current `brand_dr`, the approved run's `max_targetable_kd` when supplied by current evidence, median top-ten DR, and named weak links.
+Score 0–10 relative to current Pleasur.ai authority, never KD alone. Require current `brand_dr`, current evidence-backed `max_targetable_kd`, median top-ten DR, and named weak links. Require `max_targetable_kd > brand_dr`; otherwise return `needs_data`.
 
-When a current `max_targetable_kd` exists:
+Calculate `base_winnability` exactly:
 
 - `kd <= brand_dr` → `10`;
-- `brand_dr < kd <= max_targetable_kd` → scale linearly from `8` down to `5` across the band;
+- `brand_dr < kd <= max_targetable_kd` → `5 + 3 × (max_targetable_kd - kd) / (max_targetable_kd - brand_dr)`;
 - `max_targetable_kd < kd <= max_targetable_kd + 15` → `3`;
 - `kd > max_targetable_kd + 15` → `1` and `above_ceiling=true`.
 
-If `weak_link_count >= 3`, raise winnability by one defined tier, capped at 10, and name the URLs supporting the override.
+If `weak_link_count >= 3`, set `winnability = min(10, base_winnability + 2.0)` and name the three or more URLs supporting the override. Otherwise set `winnability = base_winnability`. Keep full precision through final ranking.
 
-When `max_targetable_kd` is not part of current approved evidence, derive winnability from the recorded BID Difficulty evidence and the bands in the scoring reference. Do not revive a legacy cache value.
+If current `max_targetable_kd` is unavailable, return `needs_data`. Do not derive an alternative from qualitative bands or revive a legacy cache value.
 
 ### 4. Free-seeker penalty
 
@@ -123,6 +123,7 @@ Summarize the ranked eligible set, tool opportunities, existing-strength routes,
 - Tool-led and existing-strength candidates were routed out before ranking.
 - Product fit is the dominant weight when products exist.
 - Winnability varies with current Pleasur.ai authority and observed SERP evidence.
+- The exact interpolation and `+2.0` weak-link adjustment reproduce the same winnability from identical evidence.
 - No above-ceiling candidate received high winnability without a named, evidence-backed weak-link override.
 - Free-seeker penalty was applied exactly once.
 - Full-precision values, tie-breaks, and lexical normalization make the result reproducible.

@@ -29,7 +29,9 @@ Use intermediate scores only when justified. Pass at `product_fit >= 3` when pro
 - `1`: weak or indirect path.
 - `0`: no credible business path.
 
-Require `business_value >= 2` for Business PASS. Useful informational product-adjacent content may score highly; do not add a commercial-wording boost.
+Treat `business_value` as a downstream prioritization signal, not an independent BID gate. A value of `1` may pass when `brand_fit >= 4`, `product_fit >= 3`, and the credible-path check pass; preserve the weak-path signal for prioritization. A value of `0` normally accompanies failed fit or no credible path. If the fields contradict one another, return `needs_data` rather than choosing which value to trust.
+
+Useful informational product-adjacent content may score highly; do not add a commercial-wording boost.
 
 Set `free_seeker=true` when the query centers on free, unlimited, uncensored, unfiltered, no-filter, no-account, no-payment, or without-paying access. Preserve it for prioritization rather than auto-rejecting it.
 
@@ -53,11 +55,12 @@ Detect tool-led SERPs separately: route when at least three of the top five orga
 Use current Pleasur.ai DR and current organic SERP evidence.
 
 - Calculate the median DR across ten usable organic results.
-- Pass if `median_top10_dr <= brand_dr + 12`.
-- Otherwise pass only if at least two named weak results have concrete displacement evidence.
+- Define a weak result as one whose DR is strictly below `brand_dr + 5`; also record its URL and concrete displacement rationale.
+- Pass if `median_top10_dr <= brand_dr + 15`.
+- Otherwise pass only if at least two named weak results meet the numeric definition and have concrete displacement evidence.
 - Treat KD as supporting context, not a standalone pass/fail gate.
 - If brand DR or adequate SERP evidence is unavailable, return `needs_data`.
 
 ## Failure reason vocabulary
 
-Prefer stable codes: `brand_fit_below_threshold`, `product_fit_below_threshold`, `business_value_below_threshold`, `vanity_rank`, `serp_is_transactional`, `serp_is_navigational`, `tool_led_routed`, `difficulty_above_reach`, `brand_dr_unavailable`, `serp_evidence_incomplete`, `country_mismatch`, `stale_evidence`, and `provider_unavailable`.
+Prefer stable codes: `brand_fit_below_threshold`, `product_fit_below_threshold`, `vanity_rank`, `no_credible_business_path`, `business_evidence_conflict`, `serp_is_transactional`, `serp_is_navigational`, `tool_led_routed`, `difficulty_above_reach`, `brand_dr_unavailable`, `serp_evidence_incomplete`, `country_mismatch`, `stale_evidence`, and `provider_unavailable`.

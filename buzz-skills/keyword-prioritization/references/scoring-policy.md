@@ -21,18 +21,22 @@ Do not re-evaluate or inflate fit at the ranking stage.
 
 ## Winnability
 
-Prefer the explicit moving-ceiling calculation in the skill when current evidence includes `max_targetable_kd`.
+Require current `brand_dr` and current evidence-backed `max_targetable_kd`, with `max_targetable_kd > brand_dr`. Calculate:
 
-If it does not, map the current BID evidence to these conservative bands:
+- `kd <= brand_dr`: `base_winnability = 10`.
+- `brand_dr < kd <= max_targetable_kd`: `base_winnability = 5 + 3 × (max_targetable_kd - kd) / (max_targetable_kd - brand_dr)`.
+- `max_targetable_kd < kd <= max_targetable_kd + 15`: `base_winnability = 3`.
+- `kd > max_targetable_kd + 15`: `base_winnability = 1`.
 
-- `9–10`: median top-ten DR is at or below brand DR and at least two results are clearly displaceable;
-- `7–8`: median top-ten DR is within 12 points of brand DR, or three named weak links create a credible opening;
-- `5–6`: BID passed on two named weak links but the median authority remains above the normal reach band;
-- `3–4`: plausible reach requiring material authority/link growth;
-- `1–2`: substantially above current reach;
-- `0`: evidence shows the SERP is not realistically contestable under the current strategy.
+If `weak_link_count >= 3`, set `winnability = min(10, base_winnability + 2.0)`; otherwise set `winnability = base_winnability`. Keep full precision through ranking.
 
-Every value must cite current brand authority and SERP evidence. KD alone cannot determine the score.
+Return `needs_data` when either authority input is missing or invalid. Do not use qualitative fallback bands. Every value must cite current brand authority and SERP evidence; KD alone cannot determine the score.
+
+Example with `brand_dr=20` and `max_targetable_kd=40`:
+
+- `kd=30` gives `base_winnability=6.5`; three weak links give `winnability=8.5`.
+- `kd=45` gives `base_winnability=3`; three weak links give `winnability=5`.
+- `kd=60` gives `base_winnability=1`; three weak links give `winnability=3`.
 
 ## Formula
 

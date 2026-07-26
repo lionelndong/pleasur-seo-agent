@@ -40,18 +40,18 @@ Batch compatible keyword requests when the live integration supports it, while p
 
 Do not infer absence from a null or failed response.
 
-### 2. Evaluate exemptions
+### 2. Evaluate routing exceptions
 
 For an AIO-present candidate:
 
-- tool-led intent is outside the blog queue; retain `PASS` only as an AIO routing note with reason `tool_led_immune`;
-- comparison-led commercial investigation may remain eligible only when the packet names a defensible reason readers still need options, criteria, evidence, or firsthand comparison beyond the AIO.
+- tool-led intent is outside the blog queue; retain `PASS` only as an AIO routing note with reason `tool_led_immune`.
+- comparison-led commercial investigation is not automatically exempt. Record the specific reason readers may still need options, criteria, evidence, or firsthand comparison, then apply presence-only mode or the deep verdict table normally.
 
-An exemption is not automatic merely because an intent label is commercial.
+No blog candidate is exempt merely because an intent label is commercial.
 
 ### 3. Apply presence-only mode
 
-For each non-exempt AIO-present candidate, set:
+For each non-tool-led AIO-present candidate, set:
 
 - `aio_completeness_score=null`;
 - `aio_click_intent=null`;
@@ -77,10 +77,16 @@ Use an independent review pass only when the active Buzz runtime exposes a gener
 
 ### 5. Set the deep verdict
 
-- Informational intent, score `8–10`: `FAIL_CANNIBALIZED`.
-- Score `5–7`: `RISKY`.
-- Score `0–4`: `PASS`.
-- Comparison intent, score `8–10`: retain only when a specific, defensible click reason survives the rubric; otherwise `FAIL_CANNIBALIZED`.
+Apply this table to every non-tool-led candidate:
+
+| Completeness score | Click intent | Verdict |
+|---|---|---|
+| `0–4` | `yes-deep` or `yes-shallow` | `PASS` |
+| `5–7` | `yes-deep` or `yes-shallow` | `RISKY` |
+| `8–10` | `yes-shallow` | `RISKY` |
+| `8–10` | `no` | `FAIL_CANNIBALIZED` |
+
+Treat any unlisted combination as internally inconsistent. Perform one documented rescore against the observed body. If it remains inconsistent, return `needs_data` with reason `aio_score_click_mismatch`; do not choose a verdict.
 
 Never force a distribution of PASS, RISKY, and FAIL results.
 
@@ -115,5 +121,6 @@ List the highest-risk candidates with their exact evidence and reasoning.
 - No failed/null response was interpreted as AIO absence.
 - Presence-only mode emitted no `FAIL_CANNIBALIZED` verdict.
 - Every deep score used an observed, fresh, query-matched Google AIO body from Ahrefs Brand Radar.
+- Every deep verdict follows the completeness-score/click-intent table; retained click value is never marked `FAIL_CANNIBALIZED`.
 - Every score and exemption has candidate-specific click reasoning.
 - No provider, model, sub-agent primitive, environment flag, cache path, cron behavior, or exit code is assumed.
